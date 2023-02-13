@@ -1,7 +1,8 @@
-from simple_trainer import encode_latents
+from simple_trainer import custom_encode_latents
 
-encode_latents(
-    "/workspace/data/frames",
-    "/workspace/data/latents",
-    "runwayml/stable-diffusion-v1-5"
+custom_encode_latents(
+    "/workspace/TempoFunk/data/tiktok/frames",
+    "//workspace/TempoFunk/data/tiktok/latents",
+    "runwayml/stable-diffusion-v1-5",
+    4
 )

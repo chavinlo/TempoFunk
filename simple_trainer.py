@@ -25,22 +25,23 @@ def torch_to_pil(x):
     return to_pil_image((x + 1) / 2)
 
 class LatentDataset(Dataset):
-    def __init__(self, latents_path, text_embed, frames, verbose: bool):
+    def __init__(self, folders_path, text_embed, frames, verbose: bool):
         self.text_embed = text_embed
-        self.latents_path = latents_path
-        self.latentsmap = sorted(os.listdir(latents_path))
+        self.folders_path = folders_path
+        self.foldersmap = sorted(os.listdir(folders_path))
         self.verbose = verbose
-        frame_index = 0
         blocksmap = []
-        tmp = []
 
-        for entry in self.latentsmap:
-            tmp.append(entry)
-            frame_index = frame_index + 1
-            if frame_index >= frames:
-                blocksmap.append(deepcopy(tmp))
-                frame_index = 0
-                tmp = []
+        for folder in self.foldersmap:
+            tmp = []
+            frame_index = 0
+            for latentframe in sorted(os.listdir(os.path.join(self.folders_path, folder))):
+                tmp.append(os.path.join(self.folders_path, folder, latentframe))
+                frame_index = frame_index + 1
+                if frame_index >= frames:
+                    blocksmap.append(deepcopy(tmp))
+                    frame_index = 0
+                    tmp = []
         self.blocksmap = blocksmap
 
         json.dump(blocksmap, open("blocksmap.json","w"))
@@ -55,7 +56,7 @@ class LatentDataset(Dataset):
         if self.verbose:
             print("Blocklist length:", len(blocklist_pointers))
         for block in blocklist_pointers:
-            tensor = torch.load(os.path.join(self.latents_path, block))['mean']
+            tensor = torch.load(block)['mean']
             #if self.verbose:
             #    print("Loaded Block:", tensor.shape)
             blocklist.append(tensor)
@@ -66,6 +67,9 @@ class LatentDataset(Dataset):
         if self.verbose:
             print("Rearranged Video Embed:", video_embed.shape)
         video_embed.to('cuda:0')
+        if self.verbose:
+            print("Saving sample video_embed")
+            torch.save(video_embed, "/workspace/TempoFunk/video_embed.pt")
         return text_embed, video_embed
 
 def encode_latents(path, outpath, model):
@@ -80,6 +84,46 @@ def encode_latents(path, outpath, model):
             m = pil_to_torch(im, 'cuda:0').unsqueeze(0)
             m = vae.encode(m).latent_dist
             torch.save({ 'mean': m.mean.squeeze().cpu(), 'std': m.std.squeeze().cpu() }, os.path.join(outpath, os.path.splitext(f)[0] + '.pt'))
+
+def split_list(input_list, chunk_no):
+    chunk_size = len(input_list) // chunk_no
+    return [input_list[i:i + chunk_size] for i in range(0, len(input_list), chunk_size)]
+
+def custom_encode_latents(path, outpath, model, gpus: int):
+    from threading import Thread
+    # gpus = 4
+    folders: list[str] = os.listdir(path)
+    folders.sort()
+    os.makedirs(outpath, exist_ok=True)
+    vae_list = []
+    for i in range(gpus):
+        vae = AutoencoderKL.from_pretrained(model, subfolder='vae').to(f'cuda:{i}')
+        vae_list.append({
+            "gpu_id": i,
+            "vae_obj": vae
+        })
+    folders_chunks = split_list(folders, gpus)
+    print(len(folders_chunks))
+    print(len(folders_chunks[0]))
+
+    def sepa_engine(chunk: list, vae_dict: dict, og_path: str, outpath: str,):
+        vae = vae_dict['vae_obj']
+        gpu_id = vae_dict['gpu_id']
+        for folder in tqdm(chunk):
+            raw_folder_path = os.path.join(og_path, folder)
+            for img in os.listdir(raw_folder_path):
+                im = Image.open(os.path.join(raw_folder_path, img))
+                im = ImageOps.fit(im, (512, 512), centering = (0.5, 0.5))
+                with torch.inference_mode():
+                    m = pil_to_torch(im, f'cuda:{gpu_id}').unsqueeze(0)
+                    m = vae.encode(m).latent_dist
+                    os.makedirs(os.path.join(outpath, folder), exist_ok=True)
+                    torch.save({ 'mean': m.mean.squeeze().cpu(), 'std': m.std.squeeze().cpu() }, os.path.join(outpath, folder, os.path.splitext(img)[0] + '.pt'))
+
+    for i in range(gpus):
+        print("eh?")
+        processThread = Thread(target=sepa_engine, args=(folders_chunks[i], vae_list[i], path, outpath,))
+        processThread.start()
 
 def encode_prompts(prompts, outpath, model):
     tokenizer = CLIPTokenizer.from_pretrained(model, subfolder='tokenizer')
@@ -127,10 +171,10 @@ def load_dataset(latent_path, prompt_path, batch_size, frames):
     return latents.to('cuda:0'), prompt.to('cuda:0')
 
 def main(epochs: int = 10):
-    pretrained_model_name_or_path = '/workspace/diffused-video-trainer/models/MaSDV'
+    pretrained_model_name_or_path = '/workspace/TempoFunk/models/MaSDV'
     learning_rate = 5e-6
     gradient_accumulation_steps = 1
-    batch_size = 6
+    batch_size = 9
     frames_length = 24
     representing_prompt = "Dancing Coreography"
     save_path = "models/"
@@ -138,17 +182,17 @@ def main(epochs: int = 10):
     txt_embed = txt_embed.squeeze(0)
     dataloader_verbose = False
     train_dataset = LatentDataset(
-        "/workspace/data/latents",
+        "/workspace/TempoFunk/data/tiktok/latents",
         txt_embed,
         frames_length,
         dataloader_verbose
     )
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    lr_warmup_steps = 0
-    unfreeze_all = True
+    lr_warmup_steps = 300
+    unfreeze_all = False
     enable_wandb = True
-    save_steps = 200
-    world_size = 2
+    save_steps = 300
+    world_size = 4
 
     os.makedirs(save_path, exist_ok=True)
 
@@ -162,7 +206,7 @@ def main(epochs: int = 10):
     if accelerator.is_local_main_process:
         if enable_wandb:
             import wandb
-            run = wandb.init(project="video_train", name="7th-of-february", mode="online")
+            run = wandb.init(project="video_train", name="fin_bs7_fp16_4xA100", mode="online")
 
     unet = UNetPseudo3DConditionModel.from_pretrained(
         pretrained_model_name_or_path,
@@ -209,7 +253,7 @@ def main(epochs: int = 10):
 
     noise_scheduler = DDPMScheduler.from_config(pretrained_model_name_or_path, subfolder="scheduler")
 
-    num_update_steps_per_epoch = math.ceil(train_dataloader.__len__() / gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(train_dataloader.__len__() / gradient_accumulation_steps / world_size)
     max_train_steps = epochs * num_update_steps_per_epoch
 
     lr_scheduler = get_scheduler(
@@ -295,15 +339,15 @@ def main(epochs: int = 10):
             if accelerator.is_local_main_process:
                 if (global_step % save_steps) == 0 and (saved_step != global_step) and accelerator.is_local_main_process:
                     saved_unet = accelerator.unwrap_model(unet, keep_fp32_wrapper = False)
-                    save_at = f'{save_path}/{str(global_step)}/'
-                    os.makedirs(save_at, exist_ok=True)
-                    torch.save(saved_unet.state_dict(), f'{save_at}/unet.pt')
+                    save_at = f'{save_path}/v6-new/{str(global_step)}.pt'
+                    torch.save(saved_unet.state_dict(), save_at)
             if global_step >= max_train_steps:
                 break
         accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         saved_unet = accelerator.unwrap_model(unet, keep_fp32_wrapper = False)
-        torch.save(saved_unet.state_dict(), 'unet.pt')
+        save_at = f'{save_path}/v6-new/{str(global_step)}.pt'
+        torch.save(saved_unet.state_dict(), save_at)
     accelerator.end_training()
 
 if __name__ == "__main__":
