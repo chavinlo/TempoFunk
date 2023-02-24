@@ -183,13 +183,13 @@ def load_dataset(latent_path, prompt_path, batch_size, frames):
 def main(epochs: int = 10):
     pretrained_model_name_or_path = '/workspace/TempoFunk/models/make-a-stable-diffusion-video-timelapse'
     seed = 22
-    learning_rate = 1e-7
+    learning_rate = 1e-3
     gradient_accumulation_steps = 1
     batch_size = 4
     frames_length = 55
     representing_prompt = "Dancing Coreography"
     project_name = "TempoFunk"
-    training_name = f"v8-1_lr{str(learning_rate)}"
+    training_name = f"v8-2_lr{str(learning_rate)}"
     lr_warmup_steps = 0
     unfreeze_all = False
     enable_wandb = True
@@ -197,6 +197,7 @@ def main(epochs: int = 10):
     enable_inference = True
     save_steps = 300
     infer_step = 300
+    start_step = 0 #<- usually 0
     val_step = 5
     save_path = f"models/{training_name}/"
     accelerator = Accelerator(
@@ -316,7 +317,7 @@ def main(epochs: int = 10):
         accelerator.init_trackers("video_diffusion")
 
     progress_bar = tqdm(range(max_train_steps))
-    global_step = 0
+    global_step = 0 + start_step
     tqdm.write(str(max_train_steps))
     tqdm.write(str(train_dataloader.__len__()))
     tqdm.write(str(epochs))
