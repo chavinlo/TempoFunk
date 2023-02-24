@@ -5,8 +5,12 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+import numpy as np
+import random
+
 from accelerate import Accelerator
 from diffusers import DDPMScheduler, UNetPseudo3DConditionModel, AutoencoderKL
+from diffusers import StableDiffusionVideoInpaintPipeline
 from diffusers.optimization import get_scheduler
 from transformers import CLIPTokenizer, CLIPTextModel
 from tqdm.auto import tqdm
@@ -17,6 +21,7 @@ from copy import deepcopy
 import time
 import json
 from einops import rearrange
+import imageio
 
 def pil_to_torch(image, device = 'cpu'):
     return (2 * (pil_to_tensor(image).to(dtype=torch.float32, device=device)) / 255) - 1
@@ -25,11 +30,12 @@ def torch_to_pil(x):
     return to_pil_image((x + 1) / 2)
 
 class LatentDataset(Dataset):
-    def __init__(self, folders_path, text_embed, frames, verbose: bool):
+    def __init__(self, folders_path, text_embed, frames, verbose: bool, device):
         self.text_embed = text_embed
         self.folders_path = folders_path
         self.foldersmap = sorted(os.listdir(folders_path))
         self.verbose = verbose
+        self.device = device
         blocksmap = []
 
         for folder in self.foldersmap:
@@ -42,13 +48,12 @@ class LatentDataset(Dataset):
                     blocksmap.append(deepcopy(tmp))
                     frame_index = 0
                     tmp = []
-        self.blocksmap = blocksmap
 
-        json.dump(blocksmap, open("blocksmap.json","w"))
+        self.blocksmap = blocksmap
 
     def __len__(self):
         return len(self.blocksmap)
-
+    
     def __getitem__(self, idx):
         blocklist_pointers = self.blocksmap[idx]
         blocklist = []
@@ -66,12 +71,13 @@ class LatentDataset(Dataset):
         video_embed = rearrange(video_embed, 'f c h w -> c f h w')
         if self.verbose:
             print("Rearranged Video Embed:", video_embed.shape)
-        video_embed.to('cuda:0')
+        video_embed.to(self.device)
         if self.verbose:
             print("Saving sample video_embed")
             torch.save(video_embed, "/workspace/TempoFunk/video_embed.pt")
         return text_embed, video_embed
 
+#unused
 def encode_latents(path, outpath, model):
     files: list[str] = os.listdir(path)
     files.sort()
@@ -125,6 +131,7 @@ def custom_encode_latents(path, outpath, model, gpus: int):
         processThread = Thread(target=sepa_engine, args=(folders_chunks[i], vae_list[i], path, outpath,))
         processThread.start()
 
+#TODO: fix device and del unused tokenizer/text encoder just like encode_single_prompt 
 def encode_prompts(prompts, outpath, model):
     tokenizer = CLIPTokenizer.from_pretrained(model, subfolder='tokenizer')
     text_encoder = CLIPTextModel.from_pretrained(model, subfolder='text_encoder').to('cuda:0')
@@ -140,9 +147,9 @@ def encode_prompts(prompts, outpath, model):
             y = text_encoder(input_ids = tokens).last_hidden_state
             torch.save(y.cpu(), os.path.join(outpath, str(i).zfill(4) + '.pt' ))
 
-def encode_single_prompt(prompt, model):
+def encode_single_prompt(prompt, model, device):
     tokenizer = CLIPTokenizer.from_pretrained(model, subfolder='tokenizer')
-    text_encoder = CLIPTextModel.from_pretrained(model, subfolder='text_encoder').to('cuda:0')
+    text_encoder = CLIPTextModel.from_pretrained(model, subfolder='text_encoder').to(device)
     with torch.inference_mode():
         tokens = tokenizer(
                 [ prompt ],
@@ -150,10 +157,13 @@ def encode_single_prompt(prompt, model):
                 return_overflowing_tokens = False,
                 padding = 'max_length',
                 return_tensors = 'pt'
-        ).input_ids.to('cuda:0')
+        ).input_ids.to(device)
         y = text_encoder(input_ids = tokens).last_hidden_state
-        return y.cuda()
+    del tokenizer
+    del text_encoder
+    return y.cuda()
 
+#TODO: fix device and del unused tokenizer/text encoder just like encode_single_prompt 
 def load_dataset(latent_path, prompt_path, batch_size, frames):
     files: list[str] = os.listdir(latent_path)
     files.sort()
@@ -171,42 +181,77 @@ def load_dataset(latent_path, prompt_path, batch_size, frames):
     return latents.to('cuda:0'), prompt.to('cuda:0')
 
 def main(epochs: int = 10):
-    pretrained_model_name_or_path = '/workspace/TempoFunk/models/MaSDV'
-    learning_rate = 5e-6
+    pretrained_model_name_or_path = '/workspace/TempoFunk/models/make-a-stable-diffusion-video-timelapse'
+    seed = 22
+    learning_rate = 1e-7
     gradient_accumulation_steps = 1
-    batch_size = 9
-    frames_length = 24
+    batch_size = 4
+    frames_length = 55
     representing_prompt = "Dancing Coreography"
-    save_path = "models/"
-    txt_embed = encode_single_prompt(representing_prompt, "runwayml/stable-diffusion-v1-5")
-    txt_embed = txt_embed.squeeze(0)
-    dataloader_verbose = False
-    train_dataset = LatentDataset(
-        "/workspace/TempoFunk/data/tiktok/latents",
-        txt_embed,
-        frames_length,
-        dataloader_verbose
-    )
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    lr_warmup_steps = 300
+    project_name = "TempoFunk"
+    training_name = f"v8-1_lr{str(learning_rate)}"
+    lr_warmup_steps = 0
     unfreeze_all = False
     enable_wandb = True
+    enable_validation = True
+    enable_inference = True
     save_steps = 300
-    world_size = 4
-
-    os.makedirs(save_path, exist_ok=True)
-
+    infer_step = 300
+    val_step = 5
+    save_path = f"models/{training_name}/"
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision='fp16',
         log_with='tensorboard',
         logging_dir='logs'
     )
-
+    world_size = accelerator.num_processes
+    print(f"There are {world_size} processes.")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if accelerator.is_local_main_process:
         if enable_wandb:
             import wandb
-            run = wandb.init(project="video_train", name="fin_bs7_fp16_4xA100", mode="online")
+            run = wandb.init(project=project_name, name=training_name, mode="online")
+            #TODO: turn config into a proper dict?
+            run.config.lr = learning_rate
+            run.config.gradient_accumululation_steps = gradient_accumulation_steps
+            run.config.batch_size = batch_size
+            run.config.frames_length = frames_length
+            run.config.representing_prompt = representing_prompt
+            run.config.lr_warmup_steps = lr_warmup_steps
+            run.config.unfreeze_all = unfreeze_all
+            run.config.enable_validation = enable_validation
+            run.config.enable_inference = enable_inference
+            run.config.save_steps = save_steps
+            run.config.world_size = world_size
+            run.config.infer_srep = infer_step
+            run.config.val_step = val_step
+            run.config.pretrained_model_name_or_path = pretrained_model_name_or_path
+            run.config.seed = seed
+
+    txt_embed = encode_single_prompt(representing_prompt, "runwayml/stable-diffusion-v1-5", accelerator.device)
+    txt_embed = txt_embed.squeeze(0)
+    dataloader_verbose = False
+    train_dataset = LatentDataset(
+        "/workspace/TempoFunk/data/tiktok/latents/train",
+        txt_embed,
+        frames_length,
+        dataloader_verbose,
+        accelerator.device
+    )
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_dataset = LatentDataset(
+        "/workspace/TempoFunk/data/tiktok/latents/val",
+        txt_embed,
+        frames_length,
+        dataloader_verbose,
+        accelerator.device
+    )
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    os.makedirs(save_path, exist_ok=True)
 
     unet = UNetPseudo3DConditionModel.from_pretrained(
         pretrained_model_name_or_path,
@@ -263,8 +308,8 @@ def main(epochs: int = 10):
         num_training_steps=max_train_steps * gradient_accumulation_steps,
     )
 
-    unet, optimizer, lr_scheduler, train_dataloader = accelerator.prepare(
-        unet, optimizer, lr_scheduler, train_dataloader
+    unet, optimizer, lr_scheduler, train_dataloader, val_dataloader = accelerator.prepare(
+        unet, optimizer, lr_scheduler, train_dataloader, val_dataloader
     )
 
     if accelerator.is_main_process:
@@ -300,6 +345,7 @@ def main(epochs: int = 10):
                 with accelerator.autocast():
                     noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
                 loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
@@ -318,35 +364,75 @@ def main(epochs: int = 10):
 
             b_end = time.perf_counter()
 
-            if enable_wandb:
-                if accelerator.is_local_main_process:
-                    seconds_per_step = b_end - b_start
-                    steps_per_second = 1 / seconds_per_step
-                    rank_tensors_per_second = batch_size * steps_per_second
-                    world_images_per_second = rank_tensors_per_second * world_size
-                    tensors_seen = global_step * batch_size * world_size
-                    wandblogs = {
-                        "loss": logs["loss"] / gradient_accumulation_steps,
-                        "lr": logs["lr"],
-                        "train_step": global_step,
-                        "epoch": epoch,
-                        "t_r/s": rank_tensors_per_second,
-                        "t_w/s": world_images_per_second,
-                        "tensors_seen": tensors_seen
-                    }
-                    run.log(wandblogs, step=global_step)
-
+            if (global_step % infer_step) == 0 and enable_inference:
+                with accelerator.autocast():
+                    tmp_pipe = StableDiffusionVideoInpaintPipeline.from_pretrained(
+                        pretrained_model_name_or_path,
+                        unet=accelerator.unwrap_model(unet),
+                        torch_dtype=torch.float32
+                    ).to(accelerator.device)
+                    init_image = Image.open("/workspace/TempoFunk/dancer.png").convert("RGB").resize((512, 512))
+                    mask_image = Image.new("L", (512,512), 0).convert("RGB")
+                    outputs = tmp_pipe(representing_prompt, 
+                                        image=init_image, 
+                                        mask_image=mask_image, 
+                                        num_inference_steps=100, 
+                                        guidance_scale=12.0, 
+                                        frames_length=frames_length).images
+                    imageio.mimsave(f"{save_path}/{str(global_step)}_{accelerator.process_index}.gif", outputs, fps=frames_length)
+            if (global_step % val_step) == 0 and enable_validation is True:
+                with torch.no_grad():
+                    val_loss = torch.tensor(0., device=accelerator.device)
+                    for text_embed, video_embed in val_dataloader:
+                        latents = video_embed * 0.18215
+                        hint_latent = latents[:,:,:1,:,:]
+                        input_latents = latents[:,:,1:,:,:]
+                        hint_latent = hint_latent
+                        input_latents = input_latents
+                        noise = torch.randn_like(input_latents)
+                        bsz = input_latents.shape[0]
+                        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=input_latents.device)
+                        timesteps = timesteps.long()
+                        noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
+                        encoder_hidden_states = text_embed
+                        mask = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
+                        latent_model_input = torch.cat([noisy_latents, mask, hint_latent.expand(-1,-1,noisy_latents.shape[2],-1,-1)], dim=1).to(accelerator.device)
+                        with accelerator.autocast():
+                            noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
+                        val_pred_loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                        val_loss = val_loss +  val_pred_loss / len(val_dataloader)
+                    val_loss = accelerator.gather(val_loss).mean().item()
+                    print("VALIDATION LOSS:", val_loss)
+                    if accelerator.is_local_main_process and enable_wandb is True:
+                        run.log({'val_loss': val_loss}, step=global_step)
             if accelerator.is_local_main_process:
+                if enable_wandb:
+                    if accelerator.is_local_main_process:
+                        seconds_per_step = b_end - b_start
+                        steps_per_second = 1 / seconds_per_step
+                        rank_tensors_per_second = batch_size * steps_per_second
+                        world_images_per_second = rank_tensors_per_second * world_size
+                        tensors_seen = global_step * batch_size * world_size
+                        wandblogs = {
+                            "loss": logs["loss"] / gradient_accumulation_steps,
+                            "lr": logs["lr"],
+                            "train_step": global_step,
+                            "epoch": epoch,
+                            "rank.t/s": rank_tensors_per_second,
+                            "world.t/s": world_images_per_second,
+                            "tensors_seen": tensors_seen
+                        }
+                        run.log(wandblogs, step=global_step)
                 if (global_step % save_steps) == 0 and (saved_step != global_step) and accelerator.is_local_main_process:
                     saved_unet = accelerator.unwrap_model(unet, keep_fp32_wrapper = False)
-                    save_at = f'{save_path}/v6-new/{str(global_step)}.pt'
+                    save_at = f'{save_path}/{str(global_step)}.pt'
                     torch.save(saved_unet.state_dict(), save_at)
             if global_step >= max_train_steps:
                 break
         accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         saved_unet = accelerator.unwrap_model(unet, keep_fp32_wrapper = False)
-        save_at = f'{save_path}/v6-new/{str(global_step)}.pt'
+        save_at = f'{save_path}/{str(global_step)}.pt'
         torch.save(saved_unet.state_dict(), save_at)
     accelerator.end_training()
 

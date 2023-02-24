@@ -24,12 +24,6 @@ while read url; do
   # Extract the video ID from the URL
   video_id=$(echo "$url" | awk -F/ '{print $NF}')
   
-  # Create a folder for the current video
-  mkdir -p "raw/${video_id}"
-  
   # Download the video
-  yt-dlp "$url" -o "raw/${video_id}/video.webm"
-  
-  # Dump the metadata as a JSON file
-  yt-dlp --dump-json "$url" > "raw/${video_id}/meta_ytdlp.json"
+  yt-dlp "$url" -o "raw/${video_id}.webm"
 done <list.txt

@@ -4,7 +4,7 @@ import imageio
 
 from PIL import Image
 
-model_id = "/workspace/TempoFunk/models/MaSDV-midinf"
+model_id = "/workspace/TempoFunk/models/latest_timelapse"
 pipe = StableDiffusionVideoInpaintPipeline.from_pretrained(
     model_id, 
     torch_dtype=torch.float16,
@@ -24,7 +24,7 @@ mask_image = Image.new("L", (512,512), 0).convert("RGB")
 counter_i = 0
 for p in prompts:
     for i in range(100):
-        images = pipe(p, image=init_image, mask_image=mask_image, num_inference_steps=100, guidance_scale=12.0, frames_length=48).images
+        images = pipe(p, image=init_image, mask_image=mask_image, num_inference_steps=100, guidance_scale=12.0, frames_length=110).images
         counter_j = 0
-        imageio.mimsave('output_' + str(counter_i) + ".gif", images, fps = 12)
+        imageio.mimsave('output_' + str(counter_i) + ".gif", images, fps = 24)
         counter_i += 1

@@ -1,9 +1,6 @@
-#!/bin/bash
-
-# loop through all raw video files
-for video in /workspace/TempoFunk/data/tiktok/raw/*/video.webm; do
+for video in /workspace/TempoFunk/data/tiktok/raw/*.webm; do
   # extract the video ID from the file path
-  video_id=$(echo $video | awk -F '/' '{print $7}')
+  video_id=$(basename "$video" .webm)
   echo $video_id
   # create a directory for the frames
   mkdir -p /workspace/TempoFunk/data/tiktok/frames/$video_id/
