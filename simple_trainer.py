@@ -1,3 +1,5 @@
+#credits to lopho
+
 import os
 import math
 
