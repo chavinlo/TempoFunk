@@ -1,0 +1,14 @@
+*.png
+*.zip
+*.gif
+*.pt
+*.mp4
+*.mov
+*.mkv
+*.webm
+wandb
+models
+data/tiktok/frames
+data/tiktok/latents
+data/tiktok/raw
+*__pycache__*
