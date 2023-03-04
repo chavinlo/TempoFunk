@@ -8,14 +8,14 @@ vae = diffusers.StableDiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5"
     ).to("cuda").vae
 
-tmp_tensor = torch.load("/workspace/TempoFunk/video_embed.pt").to("cuda")
+tmp_tensor = torch.load("/workspace/TempoFunk/video.pt").to("cuda")
 print(tmp_tensor.shape)
 
 tmp_tensor = tmp_tensor.unsqueeze(0)
 tmp_tensor = einops.rearrange(tmp_tensor, 'b c f h w -> b f c h w')
 
 frame_list = []
-frame_count = 24
+frame_count = 55
 
 for frame_index in range(frame_count):
     a_frame = tmp_tensor[:, frame_index, :, :, :]

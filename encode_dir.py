@@ -1,8 +1,9 @@
 from simple_trainer import custom_encode_latents
 
 custom_encode_latents(
-    "/workspace/TempoFunk/data/tiktok/frames",
-    "//workspace/TempoFunk/data/tiktok/latents",
-    "runwayml/stable-diffusion-v1-5",
-    4
+    frames_path="/workspace/disk/webvid/semi/frames",
+    text_path="/workspace/disk/webvid/semi/text",
+    outpath="/workspace/disk/webvid/processed",
+    model="runwayml/stable-diffusion-v1-5",
+    gpus=3
 )
