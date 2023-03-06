@@ -11,7 +11,8 @@ import numpy as np
 import random
 
 from accelerate import Accelerator
-from diffusers import DDPMScheduler, UNetPseudo3DConditionModel, AutoencoderKL
+from diffusers import DDPMScheduler, AutoencoderKL
+from model.unet_pseudo3d_condition import UNetPseudo3DConditionModel
 from diffusers import StableDiffusionVideoInpaintPipeline
 from diffusers.optimization import get_scheduler
 from transformers import CLIPTokenizer, CLIPTextModel
@@ -24,6 +25,7 @@ import time
 import json
 from einops import rearrange
 import imageio
+import cv2
 from lion_pytorch import Lion
 
 def pil_to_torch(image, device = 'cpu'):
@@ -224,16 +226,16 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
 
 def main(epochs: int = 10):
-    pretrained_model_name_or_path = '/workspace/TempoFunk/models/latest'
+    pretrained_model_name_or_path = '/workspace/TempoFunk/models/make-a-stable-diffusion-video-timelapse'
     seed = 22
     #learning_rate = 1e-4
     learning_rate = 0.000033333333333333335
     gradient_accumulation_steps = 1
-    batch_size = 4
-    frames_length = 55
+    batch_size = 10
+    frames_length = 22
     project_name = "TempoFunk"
-    training_name = f"v8-11LOCA_lr{str(learning_rate)}"
-    lr_warmup_steps = 0
+    training_name = f"v8-15-BSTEST10-INTERPO-LOCA_lr{str(learning_rate)}"
+    lr_warmup_steps = 300
     unfreeze_all = False
     enable_wandb = True
     enable_validation = True
@@ -241,7 +243,7 @@ def main(epochs: int = 10):
     dataloader_verbose = False
     save_steps = 300
     infer_step = 300
-    start_step = 7800 #<- usually 0
+    start_step = 0 #<- usually 0
     val_step = 12
     save_path = f"/workspace/disk/models/{training_name}/"
     accelerator = Accelerator(
@@ -429,18 +431,25 @@ def main(epochs: int = 10):
                     val_loss = torch.tensor(0., device=accelerator.device)
                     for text_embed, video_embed in val_dataloader:
                         latents = video_embed * 0.18215
-                        hint_latent = latents[:,:,:1,:,:]
+
+                        hint_latents = latents[:,:,0::21,:,:]
                         input_latents = latents[:,:,1:,:,:]
-                        hint_latent = hint_latent
-                        input_latents = input_latents
+
                         noise = torch.randn_like(input_latents)
                         bsz = input_latents.shape[0]
                         timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=input_latents.device)
                         timesteps = timesteps.long()
                         noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
+
+                        hint_latents_expand = hint_latents.repeat_interleave(4,2)
+                        hint_latents_expand = hint_latents_expand[:,:,:frames_length,:,:]
+
+                        masks_input = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
+
+                        latent_model_input = torch.cat([noisy_latents, masks_input, hint_latents_expand], dim=1).to(accelerator.device)
+
                         encoder_hidden_states = text_embed
-                        mask = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
-                        latent_model_input = torch.cat([noisy_latents, mask, hint_latent.expand(-1,-1,noisy_latents.shape[2],-1,-1)], dim=1).to(accelerator.device)
+
                         with accelerator.autocast():
                             noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
                         val_pred_loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
