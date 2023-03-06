@@ -10,7 +10,6 @@ step_point = 6600
 os.makedirs(output_dir, exist_ok=True)
 model_id = f"/workspace/TempoFunk/models/{step_point}"
 
-
 def infe_engine(gpu_index: int):
     pipe = StableDiffusionVideoInpaintPipeline.from_pretrained(
         model_id, 

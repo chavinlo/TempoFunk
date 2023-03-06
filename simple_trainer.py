@@ -11,28 +11,18 @@ import numpy as np
 import random
 
 from accelerate import Accelerator
-from diffusers import DDPMScheduler, AutoencoderKL
+from diffusers import DDPMScheduler
 from model.unet_pseudo3d_condition import UNetPseudo3DConditionModel
 from diffusers import StableDiffusionVideoInpaintPipeline
 from diffusers.optimization import get_scheduler
-from transformers import CLIPTokenizer, CLIPTextModel
 from tqdm.auto import tqdm
-from PIL import Image, ImageOps
-from torchvision.transforms.functional import pil_to_tensor, to_pil_image
+from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from copy import deepcopy
 import time
-import json
 from einops import rearrange
 import imageio
-import cv2
 from lion_pytorch import Lion
-
-def pil_to_torch(image, device = 'cpu'):
-    return (2 * (pil_to_tensor(image).to(dtype=torch.float32, device=device)) / 255) - 1
-
-def torch_to_pil(x):
-    return to_pil_image((x + 1) / 2)
 
 class LatentDataset(Dataset):
     def __init__(self, folders_path, texts_path, frames, verbose: bool, device):
@@ -92,140 +82,12 @@ class LatentDataset(Dataset):
             torch.save(video_embed, 'video.pt')
         return text_embed, video_embed
 
-#unused
-def encode_latents(path, outpath, model):
-    files: list[str] = os.listdir(path)
-    files.sort()
-    os.makedirs(outpath, exist_ok=True)
-    vae = AutoencoderKL.from_pretrained(model, subfolder='vae').to('cuda:0')
-    for f in tqdm(files):
-        im = Image.open(os.path.join(path, f))
-        im = ImageOps.fit(im, (512, 512), centering = (0.5, 0.5))
-        with torch.inference_mode():
-            m = pil_to_torch(im, 'cuda:0').unsqueeze(0)
-            m = vae.encode(m).latent_dist
-            torch.save({ 'mean': m.mean.squeeze().cpu(), 'std': m.std.squeeze().cpu() }, os.path.join(outpath, os.path.splitext(f)[0] + '.pt'))
-
-def split_list(input_list, chunk_no):
-    chunk_size = len(input_list) // chunk_no
-    return [input_list[i:i + chunk_size] for i in range(0, len(input_list), chunk_size)]
-
-def custom_encode_latents(frames_path, text_path, outpath, model, gpus: int):
-    from threading import Thread
-    # gpus = 4
-    folders: list[str] = sorted(os.listdir(frames_path))
-    folders.sort()
-    os.makedirs(outpath, exist_ok=True)
-    model_list = []
-    tokenizer = CLIPTokenizer.from_pretrained(model, subfolder='tokenizer')
-    for i in range(gpus):
-        vae = AutoencoderKL.from_pretrained(model, subfolder='vae').to(f'cuda:{i}')
-        text_encoder = CLIPTextModel.from_pretrained(model, subfolder='text_encoder').to(f'cuda:{i}')
-        model_list.append({
-            "gpu_id": i,
-            "vae_obj": vae,
-            "enc_obj": text_encoder
-        })
-    folders_chunks = split_list(folders, gpus)
-    print(len(folders_chunks))
-    print(len(folders_chunks[0]))
-
-    def sepa_engine(chunk: list, model_dict: dict, frames_path: str, text_path: str, outpath: str,):
-        #text file must have the same name as folder
-        #/frames/0001/001.png, 002.png, etc
-        #/texts/0001.txt
-        vae = model_dict['vae_obj']
-        enc = model_dict['enc_obj']
-        gpu_id = model_dict['gpu_id']
-        out_vid = os.path.join(outpath, 'frames')
-        out_txt = os.path.join(outpath, 'text')
-        os.makedirs(out_vid, exist_ok=True)
-        os.makedirs(out_txt, exist_ok=True)
-        for folder in tqdm(chunk):
-            predicted_text_path = os.path.join(text_path, f'{folder}.txt')
-            if os.path.exists(predicted_text_path) is False:
-                raise OSError(f"LatentDataset: Text file not found at {str(predicted_text_path)}")
-            video_label = open(predicted_text_path, "r").read()
-            with torch.inference_mode():
-                tokens = tokenizer(
-                    [ video_label ],
-                    truncation = True,
-                    return_overflowing_tokens = False,
-                    padding = 'max_length',
-                    return_tensors = 'pt'
-                ).input_ids.to(f'cuda:{gpu_id}')
-                text_embed = enc(input_ids = tokens).last_hidden_state
-                torch.save(text_embed, os.path.join(out_txt, f'{folder}.pt'))
-            raw_folder_path = os.path.join(frames_path, folder)
-            for img in sorted(os.listdir(raw_folder_path)):
-                im = Image.open(os.path.join(raw_folder_path, img))
-                im = ImageOps.fit(im, (512, 512), centering = (0.5, 0.5))
-                with torch.inference_mode():
-                    m = pil_to_torch(im, f'cuda:{gpu_id}').unsqueeze(0)
-                    m = vae.encode(m).latent_dist
-                    os.makedirs(os.path.join(out_vid, folder), exist_ok=True)
-                    torch.save({ 'mean': m.mean.squeeze().cpu(), 'std': m.std.squeeze().cpu() }, os.path.join(out_vid, folder, os.path.splitext(img)[0] + '.pt'))
-
-    for i in range(gpus):
-        print("eh?")
-        processThread = Thread(target=sepa_engine, args=(folders_chunks[i], model_list[i], frames_path, text_path, outpath,))
-        processThread.start()
-
-#TODO: fix device and del unused tokenizer/text encoder just like encode_single_prompt 
-def encode_prompts(prompts, outpath, model):
-    tokenizer = CLIPTokenizer.from_pretrained(model, subfolder='tokenizer')
-    text_encoder = CLIPTextModel.from_pretrained(model, subfolder='text_encoder').to('cuda:0')
-    for i, prompt in enumerate(prompts):
-        with torch.inference_mode():
-            tokens = tokenizer(
-                    [ prompt ],
-                    truncation = True,
-                    return_overflowing_tokens = False,
-                    padding = 'max_length',
-                    return_tensors = 'pt'
-            ).input_ids.to('cuda:0')
-            y = text_encoder(input_ids = tokens).last_hidden_state
-            torch.save(y.cpu(), os.path.join(outpath, str(i).zfill(4) + '.pt' ))
-
-def encode_single_prompt(prompt, model, device):
-    tokenizer = CLIPTokenizer.from_pretrained(model, subfolder='tokenizer')
-    text_encoder = CLIPTextModel.from_pretrained(model, subfolder='text_encoder').to(device)
-    with torch.inference_mode():
-        tokens = tokenizer(
-                [ prompt ],
-                truncation = True,
-                return_overflowing_tokens = False,
-                padding = 'max_length',
-                return_tensors = 'pt'
-        ).input_ids.to(device)
-        y = text_encoder(input_ids = tokens).last_hidden_state
-    del tokenizer
-    del text_encoder
-    return y.cuda()
-
-#TODO: fix device and del unused tokenizer/text encoder just like encode_single_prompt 
-def load_dataset(latent_path, prompt_path, batch_size, frames):
-    files: list[str] = os.listdir(latent_path)
-    files.sort()
-    assert len(files) >= batch_size * frames
-    # just make one batch for testing
-    files = files[:batch_size * frames]
-    prompt: torch.Tensor = torch.load(prompt_path)
-    prompt = prompt.pin_memory('cuda:0')
-    latents: list[torch.Tensor] = []
-    for f in tqdm(files):
-        l: dict[str, torch.Tensor] = torch.load(os.path.join(latent_path, f))
-        latents.append(l['mean'].squeeze())
-    latents: torch.Tensor = torch.stack(latents).unsqueeze(0)
-    latents = rearrange(latents, 'b f c h w -> b c f h w').unsqueeze(0)
-    return latents.to('cuda:0'), prompt.to('cuda:0')
-
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def main(epochs: int = 10):
+def main(epochs: int = 20):
     pretrained_model_name_or_path = '/workspace/TempoFunk/models/make-a-stable-diffusion-video-timelapse'
     seed = 22
     #learning_rate = 1e-4
@@ -365,6 +227,33 @@ def main(epochs: int = 10):
 
     print("starting...")
 
+    def get_loss(text_embed, video_embed):
+        latents = video_embed * 0.18215
+
+        hint_latents = latents[:,:,0::21,:,:]
+        input_latents = latents[:,:,1:,:,:]
+
+        noise = torch.randn_like(input_latents)
+        bsz = input_latents.shape[0]
+        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=input_latents.device)
+        timesteps = timesteps.long()
+        noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
+
+        hint_latents_expand = hint_latents.repeat_interleave(4,2)
+        hint_latents_expand = hint_latents_expand[:,:,:frames_length,:,:]
+
+        masks_input = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
+
+        latent_model_input = torch.cat([noisy_latents, masks_input, hint_latents_expand], dim=1).to(accelerator.device)
+
+        encoder_hidden_states = text_embed
+
+        with accelerator.autocast():
+            noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
+        loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+
+        return loss
+
     saved_step = 0
     for epoch in range(epochs):
         for text_embed, video_embed in train_dataloader:
@@ -373,22 +262,7 @@ def main(epochs: int = 10):
                 if dataloader_verbose:
                     print("Recieved text_embed", text_embed.shape)
                     print("Recieved video_embed", video_embed.shape)
-                latents = video_embed * 0.18215
-                hint_latent = latents[:,:,:1,:,:]
-                input_latents = latents[:,:,1:,:,:]
-                hint_latent = hint_latent
-                input_latents = input_latents
-                noise = torch.randn_like(input_latents)
-                bsz = input_latents.shape[0]
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=input_latents.device)
-                timesteps = timesteps.long()
-                noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
-                encoder_hidden_states = text_embed
-                mask = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
-                latent_model_input = torch.cat([noisy_latents, mask, hint_latent.expand(-1,-1,noisy_latents.shape[2],-1,-1)], dim=1).to(accelerator.device)
-                with accelerator.autocast():
-                    noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
-                loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                loss = get_loss(text_embed, video_embed)
                 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -430,29 +304,7 @@ def main(epochs: int = 10):
                 with torch.no_grad():
                     val_loss = torch.tensor(0., device=accelerator.device)
                     for text_embed, video_embed in val_dataloader:
-                        latents = video_embed * 0.18215
-
-                        hint_latents = latents[:,:,0::21,:,:]
-                        input_latents = latents[:,:,1:,:,:]
-
-                        noise = torch.randn_like(input_latents)
-                        bsz = input_latents.shape[0]
-                        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=input_latents.device)
-                        timesteps = timesteps.long()
-                        noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
-
-                        hint_latents_expand = hint_latents.repeat_interleave(4,2)
-                        hint_latents_expand = hint_latents_expand[:,:,:frames_length,:,:]
-
-                        masks_input = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
-
-                        latent_model_input = torch.cat([noisy_latents, masks_input, hint_latents_expand], dim=1).to(accelerator.device)
-
-                        encoder_hidden_states = text_embed
-
-                        with accelerator.autocast():
-                            noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
-                        val_pred_loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                        val_pred_loss = get_loss(text_embed, video_embed)
                         val_loss = val_loss +  val_pred_loss / len(val_dataloader)
                     val_loss = accelerator.gather(val_loss).mean().item()
                     print("VALIDATION LOSS:", val_loss)
