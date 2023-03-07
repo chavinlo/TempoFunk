@@ -13,7 +13,7 @@ import random
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
 from model.unet_pseudo3d_condition import UNetPseudo3DConditionModel
-from diffusers import StableDiffusionVideoInpaintPipeline
+from model.pipeline_stable_diffusion_video_inpaint import StableDiffusionVideoInpaintPipeline
 from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
 from PIL import Image
@@ -87,8 +87,8 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def main(epochs: int = 20):
-    pretrained_model_name_or_path = '/workspace/TempoFunk/models/make-a-stable-diffusion-video-timelapse'
+def main(epochs: int = 18):
+    pretrained_model_name_or_path = '/workspace/disk/models/latest'
     seed = 22
     #learning_rate = 1e-4
     learning_rate = 0.000033333333333333335
@@ -96,8 +96,8 @@ def main(epochs: int = 20):
     batch_size = 10
     frames_length = 22
     project_name = "TempoFunk"
-    training_name = f"v8-15-BSTEST10-INTERPO-LOCA_lr{str(learning_rate)}"
-    lr_warmup_steps = 300
+    training_name = f"v8-17-BS10-INTERPO-LOCA_lr{str(learning_rate)}"
+    lr_warmup_steps = 0
     unfreeze_all = False
     enable_wandb = True
     enable_validation = True
@@ -105,7 +105,7 @@ def main(epochs: int = 20):
     dataloader_verbose = False
     save_steps = 300
     infer_step = 300
-    start_step = 0 #<- usually 0
+    start_step = 2700 #<- usually 0
     val_step = 12
     save_path = f"/workspace/disk/models/{training_name}/"
     accelerator = Accelerator(
@@ -138,16 +138,16 @@ def main(epochs: int = 20):
             run.config.pretrained_model_name_or_path = pretrained_model_name_or_path
             run.config.seed = seed
     train_dataset = LatentDataset(
-        "/workspace/disk/webvid/processed/train/frames",
-        "/workspace/disk/webvid/processed/train/text",
+        "/workspace/disk/dataset/processed/train/frames",
+        "/workspace/disk/dataset/processed/train/text",
         frames_length,
         dataloader_verbose,
         accelerator.device
     )
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_dataset = LatentDataset(
-        "/workspace/disk/webvid/processed/val/frames",
-        "/workspace/disk/webvid/processed/val/text",
+        "/workspace/disk/dataset/processed/val/frames",
+        "/workspace/disk/dataset/processed/val/text",
         frames_length,
         dataloader_verbose,
         accelerator.device
@@ -229,21 +229,16 @@ def main(epochs: int = 20):
 
     def get_loss(text_embed, video_embed):
         latents = video_embed * 0.18215
-
         hint_latents = latents[:,:,0::21,:,:]
         input_latents = latents[:,:,1:,:,:]
-
         noise = torch.randn_like(input_latents)
         bsz = input_latents.shape[0]
         timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=input_latents.device)
         timesteps = timesteps.long()
         noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
-
-        hint_latents_expand = hint_latents.repeat_interleave(4,2)
-        hint_latents_expand = hint_latents_expand[:,:,:frames_length,:,:]
-
+        hint_latents_expand = hint_latents.repeat_interleave(21,2)
+        hint_latents_expand = hint_latents_expand[:,:,:frames_length-1,:,:]
         masks_input = torch.zeros([noisy_latents.shape[0], 1, noisy_latents.shape[2], noisy_latents.shape[3], noisy_latents.shape[4]]).to(accelerator.device)
-
         latent_model_input = torch.cat([noisy_latents, masks_input, hint_latents_expand], dim=1).to(accelerator.device)
 
         encoder_hidden_states = text_embed

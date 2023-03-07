@@ -853,7 +853,7 @@ class LocalTemporalAttention(nn.Module):
         try:
             from xformers.components.attention import LocalAttention
             #self.local_attn = LocalAttention(causal=True, window_size=1)
-            self.local_attn = LocalAttention(causal=True, window_size=5)
+            self.local_attn = LocalAttention(causal=True, window_size=19)
             #self.local_attn = LocalAttention()
         except ImportError:
             self.local_attn = None

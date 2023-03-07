@@ -223,7 +223,7 @@ class V_DDIMScheduler(SchedulerMixin, ConfigMixin):
         generator=None,
         variance_noise: Optional[torch.FloatTensor] = None,
         return_dict: bool = True,
-    ) -> Union[DDIMSchedulerOutput, Tuple]:
+    ) -> Union[V_DDIMSchedulerOutput, Tuple]:
         """
         Predict the sample at the previous timestep by reversing the SDE. Core function to propagate the diffusion
         process from the learned model outputs (most often the predicted noise).
@@ -341,7 +341,7 @@ class V_DDIMScheduler(SchedulerMixin, ConfigMixin):
         if not return_dict:
             return (prev_sample,)
 
-        return DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
+        return V_DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
     def add_noise(
         self,
