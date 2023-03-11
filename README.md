@@ -10,6 +10,9 @@ Version .1.8.19*:
 ![ezgif com-resize (4)](https://user-images.githubusercontent.com/85657083/224514216-a8b76a60-e990-462a-a437-bdebb4bcbaae.gif)
 ![ezgif com-resize (3)](https://user-images.githubusercontent.com/85657083/224514214-6e3b4b44-6e72-4421-baa2-e2f3bbf91ca7.gif)
 
+Prompt: "A man dancing in the middle of the scene, coreography, beautiful, motion, adequate lighting, professional"
+Negative Prompt: "Disgusting, Bad lighting, Too bright, disco lights, Bad quality, Shaky"
+
 We add extra temporal attention and freeze the rest of the unet, similar to make-a-video (?)
 
 ![make-a-video](https://user-images.githubusercontent.com/85657083/222880782-e3931bf7-c011-4a41-8293-67420e897886.png)
