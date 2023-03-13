@@ -1,4 +1,4 @@
-from model.pipeline_stable_diffusion_video_inpaint import StableDiffusionVideoInpaintPipeline
+from diffusers import StableDiffusionVideoInpaintPipeline
 import torch
 import imageio
 import os
@@ -19,8 +19,8 @@ def infe_engine(gpu_index: int):
     pipe.to(f"cuda:{gpu_index}")
 
     # notice this is only the video prompt, must be cloudscape, because I only trained on that, do not mention the cat (if it fades away, add cat prompt)
-    prompt = "Man dancing in the stage"
-    neg_prompt = ""
+    prompt = '"A man dancing in the middle of the scene, coreography, beautiful, motion, adequate lighting, professional"'
+    negative_prompt='"Disgusting, Bad lighting, Too bright, disco lights, Bad quality, Shaky"'
     # provide first frame, generated from elsewhere
     # prompt = "a portrait of a cat, sitting on top of a tall building under sunset clouds"
     init_image = Image.open("/workspace/TempoFunk/dancer.png").convert("RGB").resize((512, 512))
@@ -38,9 +38,9 @@ def infe_engine(gpu_index: int):
             mult_2 = mult_2 + 1
         infer_steps = 75+(mult*25)
         infer_cfg = 9.0+(1*mult_2)
-        images = pipe(prompt, negative_prompt=neg_prompt, image=init_image, mask_image=mask_image, num_inference_steps=infer_steps, guidance_scale=infer_cfg, frames_length=110).images
+        images = pipe(prompt, negative_prompt=negative_prompt, image=init_image, mask_image=mask_image, num_inference_steps=infer_steps, guidance_scale=infer_cfg, frames_length=22).images
         counter_j = 0
-        imageio.mimsave(os.path.join(output_dir, f'out_{i}_{gpu_index}_steps{infer_steps}_cfg{infer_cfg}.gif'), images, fps = 24)
+        imageio.mimsave(os.path.join(output_dir, f'out_{i}_{gpu_index}_steps{infer_steps}_cfg{infer_cfg}.gif'), images, fps = 22)
         counter_i += 1
 
 from threading import Thread

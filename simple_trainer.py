@@ -12,8 +12,8 @@ import random
 
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
-from model.unet_pseudo3d_condition import UNetPseudo3DConditionModel
-from model.pipeline_stable_diffusion_video_inpaint import StableDiffusionVideoInpaintPipeline
+from diffusers import DDPMScheduler, UNetPseudo3DConditionModel, AutoencoderKL
+from diffusers import StableDiffusionVideoInpaintPipeline
 from diffusers.optimization import get_scheduler
 from tqdm.auto import tqdm
 from PIL import Image
@@ -87,8 +87,8 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def main(epochs: int = 18):
-    pretrained_model_name_or_path = '/workspace/disk/models/latest'
+def main(epochs: int = 20):
+    pretrained_model_name_or_path = '/workspace/disk/models/make-a-stable-diffusion-video-timelapse'
     seed = 22
     #learning_rate = 1e-4
     learning_rate = 0.000033333333333333335
@@ -96,8 +96,8 @@ def main(epochs: int = 18):
     batch_size = 10
     frames_length = 22
     project_name = "TempoFunk"
-    training_name = f"v8-17-BS10-INTERPO-LOCA_lr{str(learning_rate)}"
-    lr_warmup_steps = 0
+    training_name = f"v8-22"
+    lr_warmup_steps = 600
     unfreeze_all = False
     enable_wandb = True
     enable_validation = True
@@ -105,8 +105,9 @@ def main(epochs: int = 18):
     dataloader_verbose = False
     save_steps = 300
     infer_step = 300
-    start_step = 2700 #<- usually 0
+    start_step = 0 #<- usually 0
     val_step = 12
+    sleep_steep = 500 #give gpus a 2 minute rest
     save_path = f"/workspace/disk/models/{training_name}/"
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -278,7 +279,7 @@ def main(epochs: int = 18):
             b_end = time.perf_counter()
 
             if (global_step % infer_step) == 0 and enable_inference:
-                set_seed(accelerator.process_index)
+                set_seed((accelerator.process_index+4)*2917)
                 with accelerator.autocast():
                     tmp_pipe = StableDiffusionVideoInpaintPipeline.from_pretrained(
                         pretrained_model_name_or_path,
@@ -287,13 +288,14 @@ def main(epochs: int = 18):
                     ).to(accelerator.device)
                     init_image = Image.open("/workspace/TempoFunk/dancer.png").convert("RGB").resize((512, 512))
                     mask_image = Image.new("L", (512,512), 0).convert("RGB")
-                    outputs = tmp_pipe("Dancing Coreography", 
+                    outputs = tmp_pipe('"A man dancing in the middle of the scene, coreography, beautiful, motion, adequate lighting, professional"',
+                                        negative_prompt='"Disgusting, Bad lighting, Too bright, disco lights, Bad quality, Shaky"',
                                         image=init_image, 
                                         mask_image=mask_image, 
                                         num_inference_steps=100, 
                                         guidance_scale=12.0, 
                                         frames_length=frames_length).images
-                    imageio.mimsave(f"{save_path}/{str(global_step)}_{accelerator.process_index}.gif", outputs, fps=frames_length)
+                    imageio.mimsave(f"{save_path}/{str(global_step)}_seed{(accelerator.process_index+4)*2917}.gif", outputs, fps=frames_length)
                 set_seed(seed)
             if (global_step % val_step) == 0 and enable_validation is True:
                 with torch.no_grad():
@@ -305,6 +307,9 @@ def main(epochs: int = 18):
                     print("VALIDATION LOSS:", val_loss)
                     if accelerator.is_local_main_process and enable_wandb is True:
                         run.log({'val_loss': val_loss}, step=global_step)
+            if (global_step % sleep_steep) == 0 is True:
+                print("Resting for 2 minutes...")
+                time.sleep(60*2)
             if accelerator.is_local_main_process:
                 if enable_wandb:
                     if accelerator.is_local_main_process:
@@ -322,6 +327,7 @@ def main(epochs: int = 18):
                             "world.t/s": world_images_per_second,
                             "tensors_seen": tensors_seen
                         }
+                        #Note: the epoch +4 is temporary!!
                         run.log(wandblogs, step=global_step)
                 if (global_step % save_steps) == 0 and (saved_step != global_step) and accelerator.is_local_main_process:
                     saved_unet = accelerator.unwrap_model(unet, keep_fp32_wrapper = False)
@@ -337,4 +343,4 @@ def main(epochs: int = 18):
     accelerator.end_training()
 
 if __name__ == "__main__":
-    main()
+    main(15)
